@@ -465,6 +465,11 @@
             const userExperience = document.getElementById('userExperience').value || '未知';
             const userSkills = document.getElementById('userSkills').value || '未知';
             
+            // 构建对话历史
+            const conversationHistory = state.messages.map(m => 
+                `${m.role === 'interviewer' ? '面试官' : '候选人'}：${m.content}`
+            ).join('\n');
+            
             // 构建系统提示词
             const systemPrompt = `你是一位经验丰富的${state.interviewType === 'hr' ? 'HR' : state.interviewType === 'technical' ? '技术专家' : '业务负责人'}面试官，正在面试一位${userExperience}经验的${jobTitle}候选人。
             
@@ -476,11 +481,13 @@ ${jobDescription}
 你的任务：
 1. 根据 JD 和面试类型，提出专业、有针对性的问题
 2. 每次只问一个问题，问题要简洁清晰
-3. 根据候选人的回答进行追问或进入下一个问题
+3. **根据候选人的回答进行追问或进入下一个问题**（重要！）
 4. 保持专业、友好的态度
 5. 总共进行${state.totalRounds}轮提问
 
-现在请开始第${state.currentRound + 1}轮提问。`;
+${conversationHistory ? '之前的对话：\n' + conversationHistory : ''}
+
+${conversationHistory ? '请基于候选人的上一个回答，提出追问或进入下一个问题。' : '现在请开始第 1 轮提问，请先让候选人做自我介绍。'};
 
             try {
                 // 调用 Claude API
