@@ -292,6 +292,14 @@
             <div class="panel">
                 <h2>面试配置</h2>
                 <div class="form-group">
+                    <label>API Key（必需）</label>
+                    <input type="password" id="apiKey" placeholder="sk-ant-...">
+                    <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                        <a href="https://console.anthropic.com/settings/keys" target="_blank">获取 Anthropic API Key</a> | 
+                        Key 仅存储在本地
+                    </div>
+                </div>
+                <div class="form-group">
                     <label>期望岗位</label>
                     <input type="text" id="jobTitle" placeholder="例如：高级产品经理">
                 </div>
@@ -313,6 +321,14 @@
                     <select id="interviewRounds">
                         <option value="3">3 轮</option>
                         <option value="5" selected>5 轮</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>每轮追问次数</label>
+                    <select id="followUpCount">
+                        <option value="1">1 次追问</option>
+                        <option value="2" selected>2 次追问</option>
+                        <option value="3">3 次追问</option>
                     </select>
                 </div>
                 <button class="btn btn-primary" onclick="startInterview()">开始面试</button>
@@ -409,16 +425,23 @@
             totalRounds: 5,
             interviewType: 'business',
             messages: [],
-            isInterviewing: false
+            isInterviewing: false,
+            followUpDepth: 0,
+            maxFollowUps: 2,
+            currentTopic: null,
+            askedQuestions: [],
+            apiKey: ''
         };
         
         // Load saved data on page load
         window.addEventListener('load', () => {
             const savedData = JSON.parse(localStorage.getItem('mockInterviewData') || '{}');
+            if (savedData.apiKey) document.getElementById('apiKey').value = savedData.apiKey;
             if (savedData.jobTitle) document.getElementById('jobTitle').value = savedData.jobTitle;
             if (savedData.jobDescription) document.getElementById('jobDescription').value = savedData.jobDescription;
             if (savedData.interviewType) document.getElementById('interviewType').value = savedData.interviewType;
             if (savedData.interviewRounds) document.getElementById('interviewRounds').value = savedData.interviewRounds;
+            if (savedData.followUpCount) document.getElementById('followUpCount').value = savedData.followUpCount;
             if (savedData.userName) document.getElementById('userName').value = savedData.userName;
             if (savedData.userExperience) document.getElementById('userExperience').value = savedData.userExperience;
             if (savedData.userSkills) document.getElementById('userSkills').value = savedData.userSkills;
@@ -427,10 +450,12 @@
         // Save data to localStorage
         function saveData() {
             const data = {
+                apiKey: document.getElementById('apiKey').value,
                 jobTitle: document.getElementById('jobTitle').value,
                 jobDescription: document.getElementById('jobDescription').value,
                 interviewType: document.getElementById('interviewType').value,
                 interviewRounds: document.getElementById('interviewRounds').value,
+                followUpCount: document.getElementById('followUpCount').value,
                 userName: document.getElementById('userName').value,
                 userExperience: document.getElementById('userExperience').value,
                 userSkills: document.getElementById('userSkills').value
@@ -439,16 +464,21 @@
         }
         
         // Add event listeners to save on change
-        ['jobTitle', 'jobDescription', 'interviewType', 'interviewRounds', 'userName', 'userExperience', 'userSkills'].forEach(id => {
+        ['apiKey', 'jobTitle', 'jobDescription', 'interviewType', 'interviewRounds', 'followUpCount', 'userName', 'userExperience', 'userSkills'].forEach(id => {
             document.getElementById(id).addEventListener('change', saveData);
             document.getElementById(id).addEventListener('input', saveData);
         });
         
         // Start Interview
         async function startInterview() {
+            const apiKey = document.getElementById('apiKey').value.trim();
             const jobTitle = document.getElementById('jobTitle').value;
             const jobDescription = document.getElementById('jobDescription').value;
             
+            if (!apiKey) {
+                alert('请填写 Anthropic API Key');
+                return;
+            }
             if (!jobTitle || !jobDescription) {
                 alert('请填写岗位和职位描述');
                 return;
@@ -457,21 +487,26 @@
             saveData();
             
             state = {
-                currentRound: 0,
+                currentRound: 1,
                 totalRounds: parseInt(document.getElementById('interviewRounds').value),
                 interviewType: document.getElementById('interviewType').value,
                 messages: [],
-                isInterviewing: true
+                isInterviewing: true,
+                followUpDepth: 0,
+                maxFollowUps: parseInt(document.getElementById('followUpCount').value),
+                currentTopic: null,
+                askedQuestions: [],
+                apiKey: apiKey
             };
             
             document.getElementById('setupPanel').classList.add('hidden');
             document.getElementById('chatPanel').classList.add('active');
             updateProgressBar();
-            await generateQuestion();
+            await generateQuestion(true);
         }
         
         // Generate Question
-        async function generateQuestion() {
+        async function generateQuestion(isFirstQuestion = false) {
             showLoading(true);
             
             const jobTitle = document.getElementById('jobTitle').value;
@@ -479,40 +514,74 @@
             const interviewType = document.getElementById('interviewType').value;
             const userExperience = document.getElementById('userExperience').value || '未知';
             const userSkills = document.getElementById('userSkills').value || '未知';
+            const userName = document.getElementById('userName').value || '候选人';
             
-            const conversationHistory = state.messages.map(m => 
-                `${m.role === 'interviewer' ? '面试官' : '候选人'}：${m.content}`
-            ).join('\n');
+            // Build structured conversation history
+            const conversationHistory = state.messages.map((m, idx) => {
+                const roundNum = Math.floor(idx / 2) + 1;
+                return `[第${roundNum}轮] ${m.role === 'interviewer' ? '面试官' : '候选人'}：${m.content}`;
+            }).join('\n');
             
-            const systemPrompt = `你是一位经验丰富的${interviewType === 'hr' ? 'HR' : interviewType === 'technical' ? '技术专家' : '业务负责人'}面试官，正在面试一位${userExperience}经验的${jobTitle}候选人。
+            // Track asked questions to avoid repetition
+            const askedQuestionsStr = state.askedQuestions.length > 0 
+                ? state.askedQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') 
+                : '无';
             
-候选人技能：${userSkills}
+            // Determine if we should follow up or ask new question
+            const isFollowUp = state.followUpDepth > 0 && state.followUpDepth <= state.maxFollowUps;
+            const followUpInstruction = isFollowUp 
+                ? `【追问模式】这是第${state.followUpDepth}次追问，请基于候选人刚才的回答进行深入追问。追问要点：
+   - 针对候选人回答中的具体细节或模糊点
+   - 询问"为什么"、"如何做"、"结果怎样"等
+   - 不要重复之前已经问过的问题
+   - 保持问题简洁，一次只问一个点`
+                : `【新问题模式】请开启一个新的面试问题，要求：
+   - 基于 JD 中的核心能力要求
+   - 避免与已问问题重复（见下方已问问题列表）
+   - 问题要具体、有场景感`;
 
-职位描述：
+            const systemPrompt = `# 角色
+你是一位经验丰富的${interviewType === 'hr' ? 'HR 面试官' : interviewType === 'technical' ? '技术专家面试官' : '业务面试官'}，正在面试一位${userExperience}经验的${jobTitle}候选人${userName !== '候选人' ? `（${userName}）` : ''}。
+
+# 面试信息
+- 面试类型：${interviewType === 'hr' ? 'HR 面' : interviewType === 'technical' ? '技术面' : interviewType === 'final' ? '终面' : '业务面'}
+- 候选人工作年限：${userExperience}
+- 候选人技能：${userSkills}
+- 面试轮数：${state.totalRounds}轮
+- 当前轮次：第${state.currentRound}轮
+
+# 职位描述
 ${jobDescription}
 
-你的任务：
-1. 根据 JD 和面试类型，提出专业、有针对性的问题
-2. 每次只问一个问题，问题要简洁清晰
-3. **根据候选人的回答进行追问或进入下一个问题**（重要！）
-4. 保持专业、友好的态度
-5. 总共进行${state.totalRounds}轮提问
+# 已问过的问题（不要重复！）
+${askedQuestionsStr}
 
-${conversationHistory ? '之前的对话：\n' + conversationHistory : ''}
+# 对话历史
+${conversationHistory || '暂无对话'}
 
-${conversationHistory ? '请基于候选人的上一个回答，提出追问或进入下一个问题。' : '现在请开始第 1 轮提问，请先让候选人做自我介绍。'}`;
+# 当前任务
+${followUpInstruction}
+
+# 输出规则（必须遵守！）
+1. **只输出问题本身**，不要有任何前缀、解释或额外说明
+2. 问题要简洁清晰，控制在 50 字以内
+3. 如果是追问，必须明确引用候选人刚才回答的内容
+4. 绝对不要重复已问过的问题
+5. 保持专业、友好的语气
+
+${isFirstQuestion ? '请让候选人做自我介绍。' : ''}`;
 
             try {
                 const response = await fetch('https://api.anthropic.com/v1/messages', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        
+                        'x-api-key': state.apiKey,
                         'anthropic-version': '2023-06-01'
                     },
                     body: JSON.stringify({
-                        model: 'claude-opus-4-6',
-                        max_tokens: 500,
+                        model: 'claude-sonnet-4-20250514',
+                        max_tokens: 300,
                         messages: [{
                             role: 'user',
                             content: systemPrompt
@@ -520,19 +589,39 @@ ${conversationHistory ? '请基于候选人的上一个回答，提出追问或�
                     })
                 });
                 
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error('API Error:', errorData);
+                    throw new Error(`API 请求失败：${response.status}`);
+                }
+                
                 const data = await response.json();
-                const question = data.content[0].text;
+                let question = data.content[0].text.trim();
+                
+                // Clean up the question - remove any prefixes
+                question = question.replace(/^(面试官：|问题：|追问：|\*+|#+)\s*/g, '').trim();
+                
+                // Track the question
+                if (!isFollowUp) {
+                    state.askedQuestions.push(question);
+                }
                 
                 addMessage('interviewer', question);
                 
             } catch (error) {
                 console.error('API 调用失败:', error);
-                addMessage('interviewer', '你好，我是今天的面试官。请先简单介绍一下你自己吧。');
+                const fallbackQuestions = [
+                    '你好，请先简单介绍一下你自己吧。',
+                    '能说说你为什么对这个岗位感兴趣吗？',
+                    '请分享一个你最有成就感的项目经历。',
+                    '你遇到过最大的工作挑战是什么？如何解决的？',
+                    '你的职业规划是什么？'
+                ];
+                const fallbackIndex = Math.min(state.askedQuestions.length, fallbackQuestions.length - 1);
+                addMessage('interviewer', fallbackQuestions[fallbackIndex]);
             }
             
             showLoading(false);
-            state.currentRound++;
-            updateProgressBar();
         }
         
         // Send Answer
@@ -545,10 +634,26 @@ ${conversationHistory ? '请基于候选人的上一个回答，提出追问或�
             addMessage('candidate', answer);
             answerInput.value = '';
             
-            if (state.currentRound >= state.totalRounds) {
+            // 判断是否继续追问还是进入下一轮
+            // followUpDepth: 0=主问题，1~maxFollowUps=追问
+            if (state.followUpDepth < state.maxFollowUps) {
+                // 继续追问
+                state.followUpDepth++;
+                showLoading(true);
+                document.getElementById('loadingText').textContent = `追问 ${state.followUpDepth}/${state.maxFollowUps}...`;
+                await generateQuestion(false);
+            } else if (state.currentRound >= state.totalRounds) {
+                // 面试结束
+                state.isInterviewing = false;
                 await generateFeedback();
             } else {
-                await generateQuestion();
+                // 进入下一轮
+                state.currentRound++;
+                state.followUpDepth = 0;
+                updateProgressBar();
+                showLoading(true);
+                document.getElementById('loadingText').textContent = `第 ${state.currentRound} 轮...`;
+                await generateQuestion(false);
             }
         }
         
@@ -571,9 +676,9 @@ ${conversationHistory ? '请基于候选人的上一个回答，提出追问或�
 面试对话：
 ${conversationHistory}
 
-请按照以下 JSON 格式输出反馈：
+请按照以下 JSON 格式输出反馈（只输出 JSON，不要有其他内容）：
 {
-  "score": 0-100,
+  "score": 0-100 的整数,
   "strengths": ["优点 1", "优点 2", "优点 3"],
   "weaknesses": ["缺点 1", "缺点 2", "缺点 3"],
   "suggestions": ["建议 1", "建议 2", "建议 3"]
@@ -584,11 +689,11 @@ ${conversationHistory}
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        
+                        'x-api-key': state.apiKey,
                         'anthropic-version': '2023-06-01'
                     },
                     body: JSON.stringify({
-                        model: 'claude-opus-4-6',
+                        model: 'claude-sonnet-4-20250514',
                         max_tokens: 1000,
                         messages: [{
                             role: 'user',
@@ -604,6 +709,8 @@ ${conversationHistory}
                 if (jsonMatch) {
                     const feedback = JSON.parse(jsonMatch[0]);
                     showFeedback(feedback);
+                } else {
+                    throw new Error('无法解析反馈 JSON');
                 }
                 
             } catch (error) {
@@ -689,12 +796,6 @@ ${conversationHistory}
             }
         }
         
-        // End Interview
-        function endInterview() {
-            if (!confirm('确定要结束面试吗？')) return;
-            generateFeedback();
-        }
-        
         // Restart Interview
         function restartInterview() {
             document.getElementById('resultPanel').classList.remove('active');
@@ -705,7 +806,12 @@ ${conversationHistory}
                 totalRounds: 5,
                 interviewType: 'business',
                 messages: [],
-                isInterviewing: false
+                isInterviewing: false,
+                followUpDepth: 0,
+                maxFollowUps: 2,
+                currentTopic: null,
+                askedQuestions: [],
+                apiKey: state.apiKey // Keep API key
             };
         }
         
