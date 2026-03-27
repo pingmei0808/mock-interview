@@ -392,6 +392,13 @@
             <div id="loadingText">AI 面试官正在思考...</div>
         </div>
         
+        <!-- Debug Panel -->
+        <div class="panel hidden" id="debugPanel" style="margin-top: 32px; background: #fff3cd; border-color: #ffc107;">
+            <h2 style="color: #856404;">🔧 调试信息</h2>
+            <div style="font-family: monospace; font-size: 12px; white-space: pre-wrap; color: #856404;" id="debugContent"></div>
+            <button class="btn" onclick="toggleDebug()" style="margin-top: 12px; background: #856404; color: white;">切换调试面板</button>
+        </div>
+        
         <!-- Result Panel -->
         <div class="result-panel" id="resultPanel">
             <div class="score-card">
@@ -542,6 +549,16 @@
             // Determine mode: follow-up or new question
             const isFollowUp = state.followUpDepth > 0;
             
+            // Debug: log state
+            console.log('[追问逻辑] 当前状态:', {
+                round: state.currentRound,
+                followUpDepth: state.followUpDepth,
+                maxFollowUps: state.maxFollowUps,
+                isFollowUp: isFollowUp,
+                messagesCount: state.messages.length,
+                askedQuestionsCount: state.askedQuestions.length
+            });
+            
             // Build the prompt - CRITICAL: explicitly tell Claude what to do
             const prompt = `你是一位经验丰富的${interviewType === 'hr' ? 'HR' : interviewType === 'technical' ? '技术专家' : '业务'}面试官。
 
@@ -566,20 +583,31 @@ ${lastUserAnswer}
 
 ## 你的任务
 ${isFollowUp 
-    ? `【追问模式】
-这是第${state.followUpDepth}次追问。
-**必须基于候选人上一个回答进行追问**，要求：
-1. 针对回答中的具体细节、模糊点、或提到的经历进行深入
-2. 可以问"为什么这么做"、"具体如何实施"、"结果如何"、"遇到什么困难"等
-3. 问题要简洁，一次只问一个点
-4. **绝对不能重复已问过的问题**`
-    : `【新问题模式】
-这是第${state.currentRound}轮的主问题。
-**必须开启一个全新的问题**，要求：
+    ? `【🔍 追问模式 - 第${state.followUpDepth}次追问】
+
+⚠️ 重要：这是追问， NOT 新的主问题！
+
+候选人刚刚回答了：
+"${lastUserAnswer}"
+
+**请基于上述回答进行追问**，例如：
+- 如果候选人提到具体项目 → 问"这个项目中你遇到的最大挑战是什么？"
+- 如果候选人提到数据结果 → 问"这个数据是如何测量的？基准是什么？"
+- 如果候选人提到方法论 → 问"这个方法是如何形成的？有遇到过不适用的情况吗？"
+
+❌ 禁止：
+- 重复已问过的问题（见上方列表）
+- 问与候选人回答无关的新话题
+- 问过于宽泛的问题（如"请分享一个项目"）`
+    : `【📋 新问题模式 - 第${state.currentRound}轮主问题】
+
+⚠️ 重要：这是新的主问题， NOT 追问！
+
+**请开启一个全新的面试问题**，要求：
 1. 基于 JD 中的核心能力要求
-2. **绝对不能与已问过的问题重复**（见上方列表）
+2. **绝对不能与已问过的问题重复**（见上方"已问过的问题"列表）
 3. 问题要具体、有场景感
-4. 如果还有剩余轮次，这个问题应该能引出后续追问`
+4. 这个问题应该能引出后续的追问`
 }
 
 ## 输出规则
@@ -619,12 +647,22 @@ ${isFollowUp
                 // Clean up the question
                 question = question.replace(/^(面试官：|问题：|追问：|\*+|#+|[""])/g, '').trim();
                 
-                // Track the question (only for main questions, not follow-ups)
-                if (!isFollowUp) {
-                    state.askedQuestions.push(question);
-                }
+                // Track ALL questions (including follow-ups) to avoid repetition
+                state.askedQuestions.push(question);
+                console.log('[追问逻辑] 已记录问题:', question);
+                console.log('[追问逻辑] 已问问题列表:', state.askedQuestions);
                 
                 addMessage('interviewer', question);
+                
+                // Update debug info
+                updateDebugInfo({
+                    mode: isFollowUp ? '追问模式' : '新问题模式',
+                    round: state.currentRound,
+                    followUpDepth: state.followUpDepth,
+                    lastUserAnswer: lastUserAnswer.substring(0, 200) + '...',
+                    askedQuestions: state.askedQuestions,
+                    generatedQuestion: question
+                });
                 
             } catch (error) {
                 console.error('API 调用失败:', error);
@@ -839,6 +877,24 @@ ${conversationHistory}
                 event.preventDefault();
                 sendAnswer();
             }
+        }
+        
+        // Toggle Debug Panel
+        let debugVisible = false;
+        function toggleDebug() {
+            const panel = document.getElementById('debugPanel');
+            debugVisible = !debugVisible;
+            if (debugVisible) {
+                panel.classList.remove('hidden');
+            } else {
+                panel.classList.add('hidden');
+            }
+        }
+        
+        // Update Debug Content
+        function updateDebugInfo(info) {
+            const debugContent = document.getElementById('debugContent');
+            debugContent.textContent = JSON.stringify(info, null, 2);
         }
     </script>
 </body>
